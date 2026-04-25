@@ -192,9 +192,16 @@ def fuzz(
   "--model", default="claude-opus-4-7",
   help="Claude model to use for the agent.",
 )
+@click.option(
+  "--solr-url", default="http://localhost:8983/solr/hone",
+  help=(
+    "Solr URL for retrieval-augmented hunting. Pass empty string "
+    "to disable retrieval."
+  ),
+)
 def hunt(
   kb: Path, target: Path | None, fwl_repo: Path | None,
-  max_turns: int, model: str,
+  max_turns: int, model: str, solr_url: str,
 ) -> None:
   """Agentic bug hunt — Claude reads source, hypothesizes, tests, iterates.
 
@@ -222,10 +229,12 @@ def hunt(
     fwl_repo_root=fwl_repo,
     max_turns=max_turns,
     model=model,
+    solr_url=solr_url or None,
   ))
   _console.print(
     f"\n[bold]hunt complete[/bold]  turns={result.turns}  "
-    f"cost=${result.total_cost_usd:.4f}"
+    f"cost=${result.total_cost_usd:.4f}  "
+    f"prior_context={result.context_items}"
   )
 
 
@@ -273,21 +282,108 @@ def index(kb: Path, solr_url: str, full: bool) -> None:
 
 
 @main.command()
-def report() -> None:
-  """Summary of findings, coverage, cost."""
-  _not_yet("report")
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root to summarize.",
+)
+@click.option(
+  "--since", default=None,
+  help=(
+    "Only count entities created on/after this ISO date "
+    "(yyyy-mm-dd). Default: all time."
+  ),
+)
+@click.option(
+  "--format", "fmt",
+  type=click.Choice(["console", "json"]), default="console",
+  help="Output format.",
+)
+def report(kb: Path, since: str | None, fmt: str) -> None:
+  """Summarize findings/misses/patterns by status, severity, layer."""
+  from .reporting.stats import build_report, render_console, render_json
+  from datetime import date
+
+  cutoff = date.fromisoformat(since) if since else None
+  stats = build_report(kb, cutoff=cutoff)
+  if fmt == "json":
+    print(render_json(stats))
+  else:
+    render_console(stats, _console)
 
 
 @main.command()
-def abstract() -> None:
-  """Pattern abstraction pass over accumulated findings."""
-  _not_yet("abstract")
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--min-findings", type=int, default=5,
+  help="Skip the pass when fewer than N findings exist (default: 5).",
+)
+@click.option(
+  "--max-turns", type=int, default=30,
+  help="Turn budget for the agent (default: 30).",
+)
+@click.option(
+  "--model", default="claude-opus-4-7",
+  help="Claude model to use.",
+)
+def abstract(
+  kb: Path, min_findings: int, max_turns: int, model: str,
+) -> None:
+  """Cluster findings into patterns. Drafts go to <kb>/patterns/.
+
+  Reads every finding under <kb>/findings/, asks Claude to group
+  them by root-cause shape, and writes one pattern document per
+  cluster of 2+ findings. Per F_SECURITY_HARNESS.md the pattern
+  abstraction is what turns "a fuzzer that found 50 bugs" into
+  "a security methodology that understands 10 classes of bugs."
+  """
+  from .agents.abstractor import abstract_patterns
+  result = asyncio.run(abstract_patterns(
+    kb_root=kb, model=model, max_turns=max_turns,
+    min_findings=min_findings,
+  ))
+  _console.print(
+    f"\n[bold]abstract complete[/bold]  turns={result.turns}  "
+    f"cost=${result.total_cost_usd:.4f}  "
+    f"patterns_written={len(result.patterns_written)}"
+  )
+  for p in result.patterns_written:
+    _console.print(f"  [green]> pattern[/green] {p}")
 
 
 @main.command()
-def critique() -> None:
-  """Self-critique pass — what worked, what didn't, what to tune."""
-  _not_yet("critique")
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--max-turns", type=int, default=30,
+  help="Turn budget for the agent (default: 30).",
+)
+@click.option(
+  "--model", default="claude-opus-4-7",
+  help="Claude model to use.",
+)
+def critique(kb: Path, max_turns: int, model: str) -> None:
+  """Self-critique pass — what's working, what to tune.
+
+  Reads recent findings + misses, asks Claude to evaluate the
+  harness's own performance: which strategies pay off, which
+  hypotheses keep missing, where coverage gaps remain. Writes the
+  meta-knowledge to <kb>/meta/<date>-critique.md.
+  """
+  from .agents.critic import self_critique
+  result = asyncio.run(self_critique(
+    kb_root=kb, model=model, max_turns=max_turns,
+  ))
+  _console.print(
+    f"\n[bold]critique complete[/bold]  turns={result.turns}  "
+    f"cost=${result.total_cost_usd:.4f}"
+  )
+  if result.report_path:
+    _console.print(f"  [cyan]> report[/cyan] {result.report_path}")
 
 
 if __name__ == "__main__":

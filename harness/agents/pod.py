@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .features import extract_from_path
+
 try:
   from claude_code_sdk import (
     AssistantMessage,
@@ -123,6 +125,41 @@ class HuntResult:
   """Aggregate outcome of one `hone hunt` invocation."""
   total_cost_usd: float = 0.0
   turns: int = 0
+  context_items: int = 0
+
+
+def _format_context(prior_items: list[dict]) -> str:
+  """Render Solr-pulled prior findings/misses/patterns as agent context.
+
+  Format keeps each item compact — id, type, summary, severity,
+  pattern_tags. Body is omitted; the agent can Read the file directly
+  if it wants more.
+  """
+  if not prior_items:
+    return (
+      "No prior findings/misses in the knowledge base for the target's "
+      "feature surface yet. You're hunting fresh ground.\n"
+    )
+  lines = [
+    "Prior findings/misses/patterns relevant to this target. Use as "
+    "context — don't re-test hypotheses already in the misses list, "
+    "and look for recurrences of patterns already documented:\n"
+  ]
+  for item in prior_items:
+    item_id = item.get("id", "?")
+    item_type = item.get("type", "?")
+    summary = (item.get("summary", "") or "").strip().split("\n", 1)[0]
+    severity = item.get("severity", "")
+    tags = item.get("pattern_tags", []) or []
+    line = f"- [{item_type}] {item_id}"
+    if severity:
+      line += f"  severity={severity}"
+    if tags:
+      line += f"  patterns={','.join(tags)}"
+    if summary:
+      line += f"\n    {summary[:200]}"
+    lines.append(line)
+  return "\n".join(lines) + "\n"
 
 
 async def hunt(
@@ -131,6 +168,8 @@ async def hunt(
   model: str = _DEFAULT_MODEL,
   max_turns: int = 80,
   fwl_repo_root: Path | None = None,
+  solr_url: str | None = None,
+  context_rows: int = 20,
 ) -> HuntResult:
   """Run one hunt session, streaming Claude's turns to stdout.
 
@@ -139,6 +178,9 @@ async def hunt(
     None, the agent picks targets from the FWL repo's examples.
   `fwl_repo_root` lets the agent discover the FWL source layout
     (defaults to ../f relative to kb_root).
+  `solr_url` enables retrieval-augmented hunt: queries Solr for prior
+    findings/misses keyed on the target's protocols + builtins and
+    injects them into the system prompt as context. Skip when None.
   """
   kb_root = kb_root.resolve()
   cwd = (
@@ -152,8 +194,33 @@ async def hunt(
   (kb_root / "findings").mkdir(parents=True, exist_ok=True)
   (kb_root / "misses").mkdir(parents=True, exist_ok=True)
 
+  # Pull prior knowledge from Solr (if configured) keyed on the
+  # target's surface features. Agents that see "we already tried X
+  # and it was safe" don't waste turns re-proposing X.
+  prior_items: list[dict] = []
+  if solr_url and target is not None and target.is_file():
+    try:
+      from ..retrieval.indexer import query_relevant
+      from ..retrieval.solr_client import SolrClient
+      feats = extract_from_path(target)
+      client = SolrClient(base_url=solr_url)
+      if client.ping():
+        prior_items = query_relevant(
+          client,
+          protocols=list(feats.protocols),
+          builtins=list(feats.builtins),
+          rows=context_rows,
+        )
+    except Exception as exc:  # noqa: BLE001 — retrieval is best-effort
+      print(f"[warn] Solr retrieval failed, hunting blind: {exc}")
+
+  context_block = _format_context(prior_items)
+  full_system = (
+    _HUNT_SYSTEM_PROMPT + "\n\n## Prior Knowledge\n\n" + context_block
+  )
+
   options = ClaudeCodeOptions(
-    system_prompt=_HUNT_SYSTEM_PROMPT,
+    system_prompt=full_system,
     model=model,
     max_turns=max_turns,
     cwd=str(cwd),
@@ -175,7 +242,7 @@ async def hunt(
       f"Budget: {max_turns} turns. Begin."
     )
 
-  result = HuntResult()
+  result = HuntResult(context_items=len(prior_items))
   async for msg in query(prompt=user_prompt, options=options):
     if isinstance(msg, AssistantMessage):
       result.turns += 1
