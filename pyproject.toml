@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hone"
+version = "0.1.0"
+description = "Adversarial AI security harness for FWL programs"
+requires-python = ">=3.11"
+dependencies = [
+  "claude-code-sdk>=0.0.25",
+  "pyyaml>=6.0",
+  "click>=8.0",
+  "rich>=13.0",
+  "watchdog>=4.0",
+  "gitpython>=3.1",
+]
+
+[project.optional-dependencies]
+fuzz = [
+  "scapy>=2.5",
+]
+retrieval = [
+  "pysolr>=3.9",
+  "sentence-transformers>=2.5",
+]
+dev = [
+  "pytest>=8.0",
+  "flake8>=7.0",
+]
+
+[project.scripts]
+hone = "harness.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["harness*"]
