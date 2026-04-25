@@ -92,8 +92,19 @@ def run_strategy(
           probe, kb_root, strategy_name, layer
         )
         results.findings_written.append(finding_path)
-        # Promote the .pkt into the kb's corpus so the next regression
-        # run picks it up automatically.
+        # Loop 8 — log direction of disagreement so calibrate can
+        # detect systematic oracle bias.
+        try:
+          from ..calibration import record_disagreement
+          record_disagreement(
+            kb_root,
+            test_id=cand.name,
+            interpreter_action=probe.interpreter_action,
+            bpf_action=probe.bpf_action,
+            context={"strategy": strategy_name},
+          )
+        except Exception:
+          pass
         _promote_to_corpus(pkt_path=tmpdir / case.pkt_file,
                            kb_root=kb_root, finding_id=cand.name)
       elif probe.verdict == Verdict.COMPILE_FAILED:
