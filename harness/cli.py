@@ -15,6 +15,7 @@ implemented" message and a pointer to the design doc, so the CLI
 surface is stable while implementation lands.
 """
 from __future__ import annotations
+import asyncio
 import sys
 from pathlib import Path
 
@@ -25,6 +26,13 @@ from . import __version__
 from .oracles.bpf_runner import run_corpus
 from .oracles.fwl_subprocess import FwlNotFound, resolve_fwl_bin
 from .reporting.console import format_corpus_results
+from .strategies import boundary_probing, oracle_divergence
+from .strategies.runner import run_strategy
+
+_STRATEGIES = {
+  "boundary_probing": boundary_probing.generate,
+  "oracle_divergence": oracle_divergence.generate,
+}
 
 
 _console = Console()
@@ -82,21 +90,186 @@ def regress(corpus: Path, fwl_bin: str | None, timeout: float) -> None:
 
 
 @main.command()
-def fuzz() -> None:
-  """Deterministic discovery (boundary / oracle-divergence)."""
-  _not_yet("fuzz")
+@click.option(
+  "--strategy", "-s",
+  type=click.Choice(list(_STRATEGIES.keys()) + ["all"]),
+  default="boundary_probing",
+  help="Which strategy to run.",
+)
+@click.option(
+  "--kb", type=click.Path(path_type=Path), required=True,
+  help="Knowledge base root — findings + corpus get written here.",
+)
+@click.option(
+  "--fwl-bin", default=None,
+  help="Path to the fwl binary (defaults to PATH).",
+)
+@click.option(
+  "--count", type=int, default=200,
+  help="Number of cases to generate (oracle_divergence only).",
+)
+@click.option(
+  "--seed", type=int, default=0,
+  help="RNG seed for stochastic strategies (oracle_divergence).",
+)
+def fuzz(
+  strategy: str, kb: Path, fwl_bin: str | None,
+  count: int, seed: int,
+) -> None:
+  """Deterministic discovery — no LLM, no API cost.
+
+  Generates candidate (program, packet) pairs, runs them through both
+  oracles, and writes findings + corpus entries to the knowledge base
+  whenever the oracles disagree.
+  """
+  try:
+    bin_path = resolve_fwl_bin(fwl_bin)
+  except FwlNotFound as exc:
+    _console.print(f"[red]{exc}[/red]")
+    sys.exit(1)
+  if not kb.exists():
+    _console.print(f"[red]knowledge base not found: {kb}[/red]")
+    sys.exit(1)
+
+  strategies = (
+    list(_STRATEGIES.items()) if strategy == "all"
+    else [(strategy, _STRATEGIES[strategy])]
+  )
+
+  total_findings = 0
+  for name, gen in strategies:
+    _console.print(f"\n[bold]running strategy[/bold] [cyan]{name}[/cyan]")
+    if name == "oracle_divergence":
+      cands = list(gen(count=count, seed=seed))
+    else:
+      cands = list(gen())
+    _console.print(f"  generated {len(cands)} candidates")
+
+    probes, results = run_strategy(
+      cands,
+      fwl_bin=bin_path,
+      kb_root=kb,
+      strategy_name=name,
+    )
+
+    _console.print(
+      f"  agreed:           [green]{results.agree}[/green]\n"
+      f"  divergent:        [red bold]{results.divergent}[/red bold]\n"
+      f"  compile_failed:   {results.compile_failed}\n"
+      f"  runner_error:     {results.runner_error}"
+    )
+    total_findings += len(results.findings_written)
+    for path in results.findings_written:
+      _console.print(f"  [red]> finding[/red] {path}")
+
+  _console.print(
+    f"\n[bold]total findings written:[/bold] "
+    f"[red bold]{total_findings}[/red bold]"
+  )
+  if total_findings:
+    sys.exit(1)
 
 
 @main.command()
-def hunt() -> None:
-  """LLM agent pods + Solr-augmented hypothesis generation."""
-  _not_yet("hunt")
+@click.option(
+  "--kb", type=click.Path(path_type=Path), required=True,
+  help="Knowledge base root — findings + corpus get written here.",
+)
+@click.option(
+  "--target", type=click.Path(exists=True, path_type=Path), default=None,
+  help="A .fw file (or directory) to focus the hunt on.",
+)
+@click.option(
+  "--fwl-repo", type=click.Path(exists=True, path_type=Path),
+  default=None,
+  help="Root of the FWL repo (defaults to <kb>/../f).",
+)
+@click.option(
+  "--max-turns", type=int, default=80,
+  help="Turn budget for the agent's loop (default: 80).",
+)
+@click.option(
+  "--model", default="claude-opus-4-7",
+  help="Claude model to use for the agent.",
+)
+def hunt(
+  kb: Path, target: Path | None, fwl_repo: Path | None,
+  max_turns: int, model: str,
+) -> None:
+  """Agentic bug hunt — Claude reads source, hypothesizes, tests, iterates.
+
+  Spawns a multi-turn Claude session with Read/Bash/Write tools
+  enabled, pointing at the knowledge base and the FWL source. The
+  agent writes any findings/misses/corpus entries directly to the kb
+  in markdown form. Auth is your Claude Code subscription — no API
+  key, no separate billing.
+  """
+  if not kb.exists():
+    _console.print(f"[red]knowledge base not found: {kb}[/red]")
+    sys.exit(1)
+
+  # Lazy import — claude-code-sdk requires the `claude` CLI to be on
+  # PATH and we don't want to error at module load if it isn't.
+  from .agents.pod import hunt as _hunt
+
+  _console.print(
+    f"[bold]hone hunt[/bold]  kb={kb}  target={target or '(any)'}  "
+    f"max_turns={max_turns}"
+  )
+  result = asyncio.run(_hunt(
+    kb_root=kb,
+    target=target,
+    fwl_repo_root=fwl_repo,
+    max_turns=max_turns,
+    model=model,
+  ))
+  _console.print(
+    f"\n[bold]hunt complete[/bold]  turns={result.turns}  "
+    f"cost=${result.total_cost_usd:.4f}"
+  )
 
 
 @main.command()
-def index() -> None:
-  """Re-index the knowledge base into Solr."""
-  _not_yet("index")
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root to index.",
+)
+@click.option(
+  "--solr-url", default="http://localhost:8983/solr/hone",
+  help="Solr core URL (default: localhost docker compose).",
+)
+@click.option(
+  "--full", is_flag=True,
+  help="Wipe the core before re-indexing (otherwise upsert).",
+)
+def index(kb: Path, solr_url: str, full: bool) -> None:
+  """(Re)index the knowledge base into Solr.
+
+  Walks <kb>/{findings,misses,patterns}/*.md, parses each via the
+  knowledge.reader module, and upserts a Solr document per file.
+  Idempotent — re-running with no changes is a no-op.
+  """
+  from .retrieval.indexer import reindex
+  from .retrieval.solr_client import SolrClient, SolrError
+
+  client = SolrClient(base_url=solr_url)
+  if not client.ping():
+    _console.print(
+      f"[red]Solr not reachable at {solr_url}.[/red] "
+      f"Is the docker compose stack up? "
+      f"`docker compose -f docker/docker-compose.yml up -d`"
+    )
+    sys.exit(1)
+  try:
+    counts = reindex(kb, client, full=full)
+  except SolrError as exc:
+    _console.print(f"[red]indexing failed: {exc}[/red]")
+    sys.exit(1)
+  _console.print(
+    f"indexed: findings={counts['findings']}  "
+    f"misses={counts['misses']}  patterns={counts['patterns']}  "
+    f"total={counts['total']}"
+  )
 
 
 @main.command()

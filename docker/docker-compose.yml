@@ -1,0 +1,28 @@
+# hone Solr stack.
+#
+# Minimal Solr 9 in a single container. Persistent volume for the
+# core data so restarts don't lose the index. Custom schema via
+# init script — see scripts/setup_solr.sh.
+#
+# Bring up:
+#   docker compose -f docker/docker-compose.yml up -d
+# Tear down:
+#   docker compose -f docker/docker-compose.yml down
+# Initial schema setup (run once after first up):
+#   ../scripts/setup_solr.sh
+
+services:
+  solr:
+    image: solr:9
+    container_name: hone-solr
+    ports:
+      - "127.0.0.1:8983:8983"
+    volumes:
+      - hone-solr-data:/var/solr
+    command:
+      - solr-precreate
+      - hone
+    restart: unless-stopped
+
+volumes:
+  hone-solr-data:
