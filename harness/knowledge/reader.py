@@ -48,6 +48,52 @@ def _strip_id_prefix(raw_id: str) -> str:
   return raw_id.split("/", 1)[1] if "/" in raw_id else raw_id
 
 
+# Aliases the agent has been observed to write that are not literal
+# Layer enum values. Mapped to the closest documented layer.
+_LAYER_ALIASES = {
+  "program": Layer.USER_RULE,
+  "user_program": Layer.USER_RULE,
+  "rule": Layer.USER_RULE,
+  "spec": Layer.COMPILER,
+  "analyzer": Layer.COMPILER,
+  "interpreter": Layer.COMPILER,
+  "emitter": Layer.COMPILER,
+  "runtime": Layer.COMPILER,
+}
+
+
+def _coerce_layer(raw) -> Layer:
+  """Tolerant Layer parser; agent-generated frontmatter sometimes uses
+  natural-language synonyms ('program', 'analyzer', ...) instead of
+  the three documented values. Fall back to user_rule rather than
+  crash the indexer."""
+  if raw is None:
+    return Layer.COMPILER
+  if isinstance(raw, Layer):
+    return raw
+  text = str(raw).strip().lower()
+  try:
+    return Layer(text)
+  except ValueError:
+    return _LAYER_ALIASES.get(text, Layer.USER_RULE)
+
+
+_SEVERITY_ALIASES = {"n/a": Severity.MEDIUM, "info": Severity.LOW}
+
+
+def _coerce_severity(raw) -> Severity:
+  """Same tolerance for severity — agents have written 'n/a' on misses."""
+  if raw is None:
+    return Severity.MEDIUM
+  if isinstance(raw, Severity):
+    return raw
+  text = str(raw).strip().lower()
+  try:
+    return Severity(text)
+  except ValueError:
+    return _SEVERITY_ALIASES.get(text, Severity.MEDIUM)
+
+
 def read_finding(path: Path) -> Finding:
   """Load one finding markdown file."""
   fm, body = _split(path.read_text(encoding="utf-8"))
@@ -57,8 +103,8 @@ def read_finding(path: Path) -> Finding:
     body=body,
     protocols=fm.get("protocol", []) or [],
     builtins=fm.get("builtins", []) or [],
-    severity=Severity(fm.get("severity", "medium")),
-    layer=Layer(fm.get("layer", "compiler")),
+    severity=_coerce_severity(fm.get("severity")),
+    layer=_coerce_layer(fm.get("layer")),
     pattern_tags=fm.get("pattern_tags", []) or [],
     status=fm.get("status", "open"),
     source_file=fm.get("source_file"),
