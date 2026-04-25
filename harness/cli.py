@@ -386,5 +386,248 @@ def critique(kb: Path, max_turns: int, model: str) -> None:
     _console.print(f"  [cyan]> report[/cyan] {result.report_path}")
 
 
+@main.command()
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--finding", "finding_id", required=True,
+  help="Finding id to mutate (e.g. 2026-04-25-rate-limit-...).",
+)
+@click.option(
+  "--fwl-bin", default=None,
+  help="Path to the fwl binary (defaults to PATH).",
+)
+def mutate(kb: Path, finding_id: str, fwl_bin: str | None) -> None:
+  """Loop 3 — Mutate a confirmed finding's PoC for related bugs.
+
+  Runs deterministic mutations (port shifts, proto swap, src_ip
+  bump, TCP flag toggles, rate_limit threshold ±1) against the .fw
+  + .pkt embedded in a finding. Each mutant runs through both
+  oracles; oracle disagreements become related findings, agreed
+  mutants are promoted to <kb>/corpus/from_mutation/.
+  """
+  from .mutation import mutate_finding
+  try:
+    bin_path = resolve_fwl_bin(fwl_bin)
+  except FwlNotFound as exc:
+    _console.print(f"[red]{exc}[/red]")
+    sys.exit(1)
+  result = mutate_finding(finding_id, kb, fwl_bin=bin_path)
+  _console.print(
+    f"\n[bold]mutate[/bold]  finding={finding_id}  "
+    f"mutants={result.total}\n"
+    f"  agreed:         {result.agree}\n"
+    f"  divergent:      [red bold]{result.divergent}[/red bold]\n"
+    f"  compile_failed: {result.compile_failed}\n"
+    f"  runner_error:   {result.runner_error}"
+  )
+  for p in result.findings_written:
+    _console.print(f"  [red]> finding[/red] {p}")
+  if result.divergent:
+    sys.exit(1)
+
+
+@main.command()
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--finding", "finding_id", required=True,
+  help="Finding id whose PoC packet to replay.",
+)
+@click.option(
+  "--targets", type=click.Path(exists=True, path_type=Path),
+  required=True,
+  help="Directory of .fw programs to consider as transfer targets.",
+)
+@click.option(
+  "--threshold", type=float, default=0.5,
+  help="Minimum jaccard score for a candidate to be in scope.",
+)
+@click.option(
+  "--fwl-bin", default=None,
+  help="Path to the fwl binary (defaults to PATH).",
+)
+def transfer(
+  kb: Path, finding_id: str, targets: Path,
+  threshold: float, fwl_bin: str | None,
+) -> None:
+  """Loop 4 — Replay a finding against every .fw with overlapping constructs.
+
+  For each .fw under --targets whose construct signature overlaps
+  the parent finding's (jaccard >= --threshold), the parent's PoC
+  packet is run through both oracles. Oracle divergences become
+  related findings; the .pkt is promoted to <kb>/corpus/from_transfer/.
+  """
+  from .transfer import transfer_finding
+  try:
+    bin_path = resolve_fwl_bin(fwl_bin)
+  except FwlNotFound as exc:
+    _console.print(f"[red]{exc}[/red]")
+    sys.exit(1)
+  result = transfer_finding(
+    finding_id, kb, targets, fwl_bin=bin_path, threshold=threshold,
+  )
+  _console.print(
+    f"\n[bold]transfer[/bold]  finding={finding_id}  "
+    f"candidates={result.total_candidates}  "
+    f"matched={result.matched}  "
+    f"skipped(low score)={result.skipped_low_score}\n"
+    f"  divergent: [red bold]{result.divergent}[/red bold]   "
+    f"agreed: {result.agreed}"
+  )
+  for p in result.findings_written:
+    _console.print(f"  [red]> finding[/red] {p}")
+  if result.divergent:
+    sys.exit(1)
+
+
+@main.command()
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--c", "ucb_c", type=float, default=None,
+  help="UCB1 exploration constant (default sqrt(2)).",
+)
+def tune(kb: Path, ucb_c: float | None) -> None:
+  """Loop 5 — Recompute strategy weights from accumulated runs.
+
+  Reads <kb>/meta/strategy_runs.jsonl, runs UCB1 over per-strategy
+  hits/runs, writes new weights to <kb>/meta/strategy_weights.json
+  (5% floor per strategy so nothing starves), and appends an entry
+  to <kb>/meta/strategy_history.jsonl for auditability.
+  """
+  from .scheduling import recompute_weights
+  import math
+  reg = recompute_weights(kb, c=ucb_c if ucb_c is not None else math.sqrt(2))
+  if not reg.weights:
+    _console.print(
+      "[yellow]No strategy runs recorded yet — nothing to tune.[/yellow]"
+    )
+    return
+  _console.print(
+    f"\n[bold]tune[/bold]  last_tuned={reg.last_tuned}\n"
+  )
+  for name in sorted(reg.weights, key=reg.weights.get, reverse=True):
+    s = reg.stats.get(name)
+    runs = s.runs if s else 0
+    hits = s.hits if s else 0
+    _console.print(
+      f"  {name:<24} weight={reg.weights[name]:.3f}  "
+      f"hits/runs={hits}/{runs}"
+    )
+
+
+@main.command()
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--from", "pool", default=None,
+  help="Comma-separated subset to draw from (default: all known).",
+)
+@click.option(
+  "--seed", type=int, default=None,
+  help="RNG seed for deterministic draws.",
+)
+def schedule(kb: Path, pool: str | None, seed: int | None) -> None:
+  """Loop 5 — Draw the next strategy proportional to current weights."""
+  import random
+  from .scheduling import draw_weighted
+  rng = random.Random(seed) if seed is not None else None
+  pool_list = [s.strip() for s in pool.split(",")] if pool else None
+  pick = draw_weighted(kb, strategies=pool_list, rng=rng)
+  if pick is None:
+    _console.print(
+      "[yellow]No strategies registered yet. Record a run first via "
+      "the strategies pipeline (or call scheduling.record_run).[/yellow]"
+    )
+    sys.exit(2)
+  print(pick)
+
+
+@main.command("diff-impact")
+@click.option(
+  "--repo", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Path to the FWL repo (where git diff runs).",
+)
+@click.option(
+  "--base", required=True,
+  help="Base ref (e.g. main, HEAD~10) for the diff.",
+)
+@click.option(
+  "--head", default="HEAD",
+  help="Head ref for the diff (default: HEAD).",
+)
+@click.option(
+  "--map", "construct_map", type=click.Path(path_type=Path), default=None,
+  help="Path to compiler_construct_map.yaml (default: bundled).",
+)
+def diff_impact_cmd(
+  repo: Path, base: str, head: str, construct_map: Path | None,
+) -> None:
+  """Loop 7 — Map a compiler diff to impacted FWL constructs.
+
+  Suggested follow-up: bias the next `hone schedule` toward
+  strategies that exercise the impacted constructs (current scheduler
+  doesn't know about constructs yet — printed for manual use).
+  """
+  from .diff_sensitivity import diff_impact
+  imp = diff_impact(repo, base, head, construct_map_path=construct_map)
+  _console.print(
+    f"\n[bold]diff-impact[/bold]  {imp.base_ref}..{imp.head_ref}\n"
+    f"  changed files: {len(imp.changed_files)}\n"
+    f"  impacted constructs: "
+    f"[cyan]{', '.join(sorted(imp.impacted_constructs)) or '(none)'}[/cyan]"
+  )
+  if imp.unmapped_files:
+    _console.print(
+      "  [yellow]unmapped files (consider updating construct map):"
+      "[/yellow]"
+    )
+    for f in imp.unmapped_files[:10]:
+      _console.print(f"    - {f}")
+
+
+@main.command()
+@click.option(
+  "--kb", type=click.Path(exists=True, path_type=Path), required=True,
+  help="Knowledge base root.",
+)
+@click.option(
+  "--window", type=int, default=100,
+  help="How many recent disagreements to consider (default: 100).",
+)
+@click.option(
+  "--threshold", type=float, default=0.8,
+  help="Same-direction ratio that triggers a bias flag (default 0.8).",
+)
+def calibrate(kb: Path, window: int, threshold: float) -> None:
+  """Loop 8 — Report on systematic oracle disagreement bias."""
+  from .calibration import build_report
+  r = build_report(kb, window=window, bias_threshold=threshold)
+  _console.print(
+    f"\n[bold]calibrate[/bold]  window={window}  "
+    f"threshold={threshold}\n  total events: {r.total}"
+  )
+  for direction, n in sorted(r.by_direction.items()):
+    _console.print(f"  {direction:<24} {n}")
+  if r.flagged_bias:
+    _console.print(
+      f"\n[red bold]>> systematic bias detected[/red bold]: "
+      f"{r.flagged_bias} ({r.ratio:.0%} of directional disagreements)"
+    )
+  elif r.total >= 5:
+    _console.print(
+      "\n[green]No systematic bias detected.[/green]"
+    )
+
+
 if __name__ == "__main__":
   main()

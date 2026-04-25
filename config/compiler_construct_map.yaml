@@ -1,0 +1,29 @@
+# Static mapping from FWL compiler source paths to the FWL
+# constructs they implement. Loop 7 (compiler diff sensitivity) uses
+# this map to translate "this file changed" into "these constructs
+# need extra hunt budget for the next round".
+#
+# Update this file by hand whenever the compiler structure shifts.
+# Use "all" for paths that influence every construct (parser,
+# grammar, top-level analyzer).
+#
+# Path conventions: relative to the FWL repo root. A trailing slash
+# matches the directory recursively; otherwise files matching the
+# exact prefix or path are matched.
+
+fwl/fwl/grammar.lark: [all]
+fwl/fwl/parser.py: [all]
+fwl/fwl/ast.py: [all]
+fwl/fwl/analyzer.py: [all]
+
+fwl/fwl/interpreter.py: [interpreter, rate_limit, count, log, cidr, port_range, boolean]
+fwl/fwl/emitter.py: [emitter, rate_limit, count, log, cidr, port_range, boolean]
+
+fwl/fwl/runner.py: [runner, rate_limit_state]
+fwl/fwl/bpf_runner.py: [bpf_runner]
+fwl/fwl/pkt.py: [pkt_format, builder]
+fwl/fwl/cli.py: [cli]
+fwl/fwl/errors.py: [errors]
+
+docs/FWL_V01_SPEC.md: [spec]
+docs/PKT_V01_SPEC.md: [pkt_format]
