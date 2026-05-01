@@ -1,0 +1,24 @@
+[Unit]
+Description=hone soak — 30-minute cadence
+Documentation=https://github.com/einheitdev/f-hone
+
+[Timer]
+# First fire 5 minutes after boot (lets fd.service stabilise),
+# then every 30 minutes thereafter.
+OnBootSec=5min
+OnUnitActiveSec=30min
+
+# Don't catch up on missed runs after a downtime — we don't want
+# the soak to spam Claude with 50 backlogged hunts after the host
+# wakes from suspend.
+Persistent=false
+
+# Drop the trigger if the previous tick is still running. The
+# service's TimeoutStartSec=20m is the per-tick ceiling; a tick
+# overshooting that is a problem worth catching, not papering over.
+RandomizedDelaySec=0
+
+Unit=hone-soak.service
+
+[Install]
+WantedBy=timers.target

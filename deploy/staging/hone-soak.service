@@ -1,0 +1,33 @@
+[Unit]
+Description=hone soak — periodic regress / fuzz / hunt / tune
+Documentation=https://github.com/einheitdev/f-hone
+After=fd.service
+Wants=fd.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/f-hone
+Environment=PATH=/opt/f-hone/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HONE_KB=/opt/f-knowlege-base
+Environment=HONE_FWL_REPO=/opt/f
+Environment=HONE_TARGET=/opt/f/fwl/examples/dogfood_v02.fw
+Environment=HONE_MODEL=claude-opus-4-7
+Environment=HONE_DAILY_BUDGET_USD=10
+Environment=STATE_DIR=/var/log/f-hone/soak
+ExecStart=/opt/f-hone/scripts/hone-soak.sh
+
+# Run as the same uid/gid that owns the kb so file writes don't
+# generate permission churn during the soak window.
+User=fd
+Group=fd
+
+# Hardening — the script reads kb files and writes log entries.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/f-knowlege-base /var/log/f-hone /tmp
+
+# Time bound — a single tick should never run longer than a hunt's
+# 80-turn budget plus regress/fuzz/tune overhead.
+TimeoutStartSec=20m
