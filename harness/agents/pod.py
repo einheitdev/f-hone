@@ -15,6 +15,7 @@ key, no separate billing. Same workaround as fwl-test-agent for
 unknown event types in the SDK.
 """
 from __future__ import annotations
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -219,6 +220,15 @@ async def hunt(
     _HUNT_SYSTEM_PROMPT + "\n\n## Prior Knowledge\n\n" + context_block
   )
 
+  # Capture the claude CLI's own stderr to a sibling log so the next
+  # mid-stream subprocess crash produces a real diagnostic instead of
+  # the SDK's hardcoded "Check stderr output for details" placeholder.
+  stderr_log_path = (
+    kb_root / "meta" / f"hunt-stderr-{int(time.time())}.log"
+  )
+  stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+  stderr_log = open(stderr_log_path, "w", encoding="utf-8")
+
   options = ClaudeCodeOptions(
     system_prompt=full_system,
     model=model,
@@ -227,6 +237,8 @@ async def hunt(
     permission_mode="bypassPermissions",
     allowed_tools=["Read", "Bash", "Write", "Edit", "Grep", "Glob"],
     settings='{"sandbox":{"enabled":false}}',
+    extra_args={"debug-to-stderr": None},
+    debug_stderr=stderr_log,
   )
 
   if target is None:
@@ -243,17 +255,29 @@ async def hunt(
     )
 
   result = HuntResult(context_items=len(prior_items))
-  async for msg in query(prompt=user_prompt, options=options):
-    if isinstance(msg, AssistantMessage):
-      result.turns += 1
-      for block in msg.content:
-        if isinstance(block, TextBlock):
-          text = block.text.strip()
-          if text:
-            preview = text if len(text) < 800 else text[:800] + "..."
-            print(f"\n[turn {result.turns}]\n{preview}\n")
-    elif isinstance(msg, ResultMessage):
-      if msg.total_cost_usd is not None:
-        result.total_cost_usd = msg.total_cost_usd
+  print(f"[hunt] claude CLI stderr -> {stderr_log_path}")
+  try:
+    async for msg in query(prompt=user_prompt, options=options):
+      if isinstance(msg, AssistantMessage):
+        result.turns += 1
+        for block in msg.content:
+          if isinstance(block, TextBlock):
+            text = block.text.strip()
+            if text:
+              preview = text if len(text) < 800 else text[:800] + "..."
+              print(f"\n[turn {result.turns}]\n{preview}\n")
+      elif isinstance(msg, ResultMessage):
+        if msg.total_cost_usd is not None:
+          result.total_cost_usd = msg.total_cost_usd
+  finally:
+    stderr_log.flush()
+    stderr_log.close()
+    # If the file is empty, drop it so the meta dir doesn't accumulate
+    # empty turds for clean runs.
+    try:
+      if stderr_log_path.stat().st_size == 0:
+        stderr_log_path.unlink()
+    except OSError:
+      pass
 
   return result
