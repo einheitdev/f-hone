@@ -1,0 +1,30 @@
+# fd configuration for the v0.2 soak.
+#
+# Copy to /etc/f/fd.yaml on the dev VM. The systemd unit reads
+# `--bundle-dir` and `--interfaces` from its [Service] block;
+# this file is the source of truth for everything else.
+
+interfaces:
+  - eth0
+
+# Compiled-bundle root. fd's cold-boot path reads
+# <bundle_dir>/current/main.bpf.o on every start.
+bundle_dir: /usr/share/f/compiled
+
+# BPF map pin directory. Must live under a bpffs mount.
+pin_path: /sys/fs/bpf/f
+
+# Live-reload watcher (optional — disabled during soak so the
+# observed program stays static).
+watch:
+  enabled: false
+  source: /etc/f/rules.fw
+  compiled_dir: /usr/share/f/compiled
+
+# Engine knobs.
+engine:
+  conntrack_enabled: true
+  conntrack_timeout_s: 300
+
+# Logging.
+log_level: info
