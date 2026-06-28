@@ -51,7 +51,7 @@ hone fuzz --strategy boundary_probing --kb "${HONE_KB}" \
     --fwl-bin "$(command -v fwl)" 2>&1 | tail -8
 
 # 3. oracle_divergence — rotate seed by hour-of-day for variety
-seed=$(( $(date -u +%H) % 4 ))
+seed=$(( 10#$(date -u +%H) % 4 ))
 echo "--- fuzz: oracle_divergence seed=${seed} ---"
 hone fuzz --strategy oracle_divergence --kb "${HONE_KB}" \
     --fwl-bin "$(command -v fwl)" --count 1000 --seed "${seed}" 2>&1 \

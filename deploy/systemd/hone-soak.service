@@ -18,13 +18,13 @@ ExecStart=/opt/f-hone/scripts/hone-soak.sh
 
 # Run as the same uid/gid that owns the kb so file writes don't
 # generate permission churn during the soak window.
-User=fd
-Group=fd
+User=worker
+Group=worker
 
 # Hardening — the script reads kb files and writes log entries.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 PrivateTmp=true
 ReadWritePaths=/opt/f-knowlege-base /var/log/f-hone /tmp
 
