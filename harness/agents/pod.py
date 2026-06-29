@@ -163,6 +163,23 @@ def _format_context(prior_items: list[dict]) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _load_focus_prompt(focus: str | None) -> str:
+  """Return the named hunt-focus prompt block, or "" when none.
+
+  Focus prompts live in `harness/agents/prompts/<focus>.md` (e.g.
+  `nat-bypass`, `conntrack-poisoning`, `checksum-corruption`); they
+  narrow a hunt onto one bug class by appending targeted guidance to the
+  base system prompt."""
+  if not focus:
+    return ""
+  path = Path(__file__).parent / "prompts" / f"{focus}.md"
+  if not path.exists():
+    raise FileNotFoundError(
+      f"unknown hunt focus '{focus}' (no {path.name} in prompts/)"
+    )
+  return "\n\n## Hunt Focus\n\n" + path.read_text(encoding="utf-8")
+
+
 async def hunt(
   kb_root: Path,
   target: Path | None = None,
@@ -171,6 +188,7 @@ async def hunt(
   fwl_repo_root: Path | None = None,
   solr_url: str | None = None,
   context_rows: int = 20,
+  focus: str | None = None,
 ) -> HuntResult:
   """Run one hunt session, streaming Claude's turns to stdout.
 
@@ -217,7 +235,8 @@ async def hunt(
 
   context_block = _format_context(prior_items)
   full_system = (
-    _HUNT_SYSTEM_PROMPT + "\n\n## Prior Knowledge\n\n" + context_block
+    _HUNT_SYSTEM_PROMPT + _load_focus_prompt(focus)
+    + "\n\n## Prior Knowledge\n\n" + context_block
   )
 
   # Capture the claude CLI's own stderr to a sibling log so the next
