@@ -26,12 +26,18 @@ from . import __version__
 from .oracles.bpf_runner import run_corpus
 from .oracles.fwl_subprocess import FwlNotFound, resolve_fwl_bin
 from .reporting.console import format_corpus_results
-from .strategies import boundary_probing, oracle_divergence
+from .strategies import (
+  boundary_probing, oracle_divergence, checksum_verify, cross_family_nat,
+)
 from .strategies.runner import run_strategy
 
 _STRATEGIES = {
   "boundary_probing": boundary_probing.generate,
   "oracle_divergence": oracle_divergence.generate,
+  # Phase 5 NAT: verify checksums after every rewrite, and that the
+  # IPv4-only NAT path treats v4/v6 frames consistently.
+  "checksum_verify": checksum_verify.generate,
+  "cross_family_nat": cross_family_nat.generate,
 }
 
 
@@ -199,9 +205,17 @@ def fuzz(
     "to disable retrieval."
   ),
 )
+@click.option(
+  "--focus", default=None,
+  help=(
+    "Narrow the hunt onto one bug class via a named prompt in "
+    "agents/prompts/ (e.g. nat-bypass, conntrack-poisoning, "
+    "checksum-corruption)."
+  ),
+)
 def hunt(
   kb: Path, target: Path | None, fwl_repo: Path | None,
-  max_turns: int, model: str, solr_url: str,
+  max_turns: int, model: str, solr_url: str, focus: str | None,
 ) -> None:
   """Agentic bug hunt — Claude reads source, hypothesizes, tests, iterates.
 
@@ -230,6 +244,7 @@ def hunt(
     max_turns=max_turns,
     model=model,
     solr_url=solr_url or None,
+    focus=focus,
   ))
   _console.print(
     f"\n[bold]hunt complete[/bold]  turns={result.turns}  "
