@@ -28,6 +28,7 @@ from .oracles.fwl_subprocess import FwlNotFound, resolve_fwl_bin
 from .reporting.console import format_corpus_results
 from .strategies import (
   boundary_probing, oracle_divergence, checksum_verify, cross_family_nat,
+  pipeline_equivalence,
 )
 from .strategies.runner import run_strategy
 
@@ -38,6 +39,10 @@ _STRATEGIES = {
   # IPv4-only NAT path treats v4/v6 frames consistently.
   "checksum_verify": checksum_verify.generate,
   "cross_family_nat": cross_family_nat.generate,
+  # v0.4 § 6.6: run each program single-stage AND split, require
+  # byte-identical results. Executed via a dedicated in-process path
+  # (see the fuzz command) rather than the standard oracle runner.
+  "pipeline_equivalence": pipeline_equivalence.generate,
 }
 
 
@@ -150,6 +155,21 @@ def fuzz(
     else:
       cands = list(gen())
     _console.print(f"  generated {len(cands)} candidates")
+
+    # v0.4 § 6.6: pipeline_equivalence compares two compilations of one
+    # program (single vs split), so it can't use the oracle runner.
+    if name == "pipeline_equivalence":
+      eq = pipeline_equivalence.run_equivalence(cands, kb_root=kb)
+      _console.print(
+        f"  agreed:           [green]{eq.agree}[/green]\n"
+        f"  divergent:        [red bold]{eq.divergent}[/red bold]\n"
+        f"  skipped(no CAP):  {eq.skipped}\n"
+        f"  errors:           {eq.errors}"
+      )
+      for d in eq.divergences[:20]:
+        _console.print(f"  [red]> divergence[/red] {d}")
+      total_findings += eq.divergent
+      continue
 
     probes, results = run_strategy(
       cands,
